@@ -1,33 +1,35 @@
 ```mermaid
-graph LR
-    Input(["输入 bev_feat<br/>(bs, 256, 85, 50)"]) 
-
-    subgraph Block1 [第一阶段: 高维增强]
-        B1_1["DWConvBlock<br/>(dim: 768, k: 3)"]
-        B1_2["DownsampleBlock<br/>(s: 1, out: 512)"]
+graph TD
+    Start([输入 bev_feat: bs, 85, 50, 256]) --> Permute[维度置换: bs, 256, 85, 50]
+    
+    subgraph CNN_Encoder [特征提取层]
+        Permute --> Conv[bev_encoder: 经过 4 组 DWConv + Downsample]
+        Conv --> ConvOut[卷积特征: bs, 256, 43, 25]
     end
 
-    subgraph Block2 [第二阶段: 特征压缩]
-        B2_1["DWConvBlock<br/>(dim: 512, k: 3)"]
-        B2_2["DownsampleBlock<br/>(s: 1, out: 256)"]
+    ConvOut --> Split{并行计算}
+
+    subgraph Branch_Learnable [支路 1: 可学习位置编码]
+        Split --> L1[取出 Embedding 权重]
+        L1 --> L2[repeat 为 Batch 维度]
+        L2 --> LearnPos[learnable_pos: bs, 1075, 256]
     end
 
-    subgraph Block3 [第三阶段: 空间下采样]
-        B3_1["DWConvBlock<br/>(dim: 256, k: 3)"]
-        B3_2["DownsampleBlock<br/>(s: 2, out: 256)"]
+    subgraph Branch_Coord [支路 2: 真实坐标位置编码]
+        Split --> C1[bev_pos_hw 插值对齐到 43x25]
+        C1 --> C2[pos2posemb2d: 正余弦变换]
+        C2 --> C3[coord_pos_encoder: MLP 映射]
+        C3 --> CoordPos[coord_pos: bs, 1075, 256]
     end
 
-    subgraph Block4 [第四阶段: 最终平滑]
-        B4_1["DWConvBlock<br/>(dim: 256, k: 3)"]
-    end
+    LearnPos --> Fusion[Softmax 权重融合]
+    CoordPos --> Fusion
+    Fusion --> FusedPos[fused_pos_emb: bs, 1075, 256]
 
-    Input --> Block1
-    Block1 --> Block2
-    Block2 --> Block3
-    Block3 --> Block4
-    Block4 --> Output(["输出 conv_feat<br/>(bs, 256, 43, 25)"])
-
-    style Block1 fill:#f0f7ff,stroke:#005cc5
-    style Block2 fill:#fff7e6,stroke:#d46b08
-    style Block3 fill:#f6ffed,stroke:#389e0d
-    style Block4 fill:#f9f0ff,stroke:#722ed1
+    ConvOut --> Reshape[Flatten 展平: bs, 1075, 256]
+    
+    Reshape --> Add[特征 + 位置编码]
+    FusedPos --> Add
+    
+    Add --> Final[OutputAdapter + LayerNorm]
+    Final --> End([输出: fused_feat, fused_pos, mask])
